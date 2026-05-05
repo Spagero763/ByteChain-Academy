@@ -1,5 +1,5 @@
-import { Course } from 'src/courses/entities/course.entity';
-import { Quiz } from 'src/quizzes/entities/quiz.entity';
+import { Course } from '../../courses/entities/course.entity';
+import { Quiz } from '../../quizzes/entities/quiz.entity';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -21,10 +21,13 @@ export class Lesson {
   @Column('text')
   content: string;
 
-  @Column({ nullable: true })
+  @Column({ default: true })
+  published: boolean;
+
+  @Column({ type: 'varchar', nullable: true })
   videoUrl: string; // External video URL
 
-  @Column({ nullable: true })
+  @Column({ type: 'int', nullable: true })
   videoStartTimestamp: number; // Optional start timestamp in seconds
 
   @Column({ default: 0 })

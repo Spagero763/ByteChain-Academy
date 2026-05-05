@@ -4,12 +4,13 @@ import {
   ConflictException,
   UnauthorizedException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { ILike, Repository, MoreThan } from 'typeorm';
+import { ILike, Repository, MoreThan, Like } from 'typeorm';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
-import { RegisterDto } from 'src/auth/dto/register.dto';
+import { RegisterDto } from '../auth/dto/register.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { User, UserRole } from './entities/user.entity';
 import { Certificate } from '../certificates/entities/certificate.entity';
@@ -17,12 +18,23 @@ import { UserBadge } from '../rewards/entities/user-badge.entity';
 import { CourseRegistration } from '../courses/entities/course-registration.entity';
 import { promises as fs } from 'fs';
 import { extname, join } from 'path';
+import { PaginatedResult } from '../common/services/pagination.service';
 
 type AvatarUploadFile = {
   size: number;
   mimetype: string;
   originalname: string;
   buffer: Buffer;
+};
+
+export type PublicProfileDto = {
+  id: string;
+  username: string | null;
+  xp: number;
+  badgesCount: number;
+  coursesCompleted: number;
+  avatarUrl: string | null;
+  bio: string | null;
 };
 
 @Injectable()
@@ -134,6 +146,23 @@ export class UserService {
     return user.points ?? 0;
   }
 
+  /**
+   * Maps a User entity and its badge count to the public profile shape.
+   * Centralises the mapping so that getPublicProfile() and findByUsername()
+   * stay in sync without duplicating the field list.
+   */
+  private toPublicProfile(user: User, badgesCount: number): PublicProfileDto {
+    return {
+      id: user.id,
+      username: user.username ?? user.name ?? null,
+      xp: this.resolveXp(user),
+      badgesCount,
+      coursesCompleted: user.coursesCompleted ?? 0,
+      avatarUrl: user.avatarUrl ?? null,
+      bio: user.bio ?? null,
+    };
+  }
+
   async getProfile(userId: string): Promise<User> {
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
@@ -154,13 +183,12 @@ export class UserService {
       user.name = updateProfileDto.username;
     }
     if (updateProfileDto.bio !== undefined) user.bio = updateProfileDto.bio;
+    if (updateProfileDto.onboardingCompleted !== undefined)
+      user.onboardingCompleted = updateProfileDto.onboardingCompleted;
+    if (updateProfileDto.learningGoal !== undefined)
+      user.learningGoal = updateProfileDto.learningGoal;
 
     return this.userRepository.save(user);
-  }
-
-  async deleteProfile(userId: string): Promise<void> {
-    const user = await this.getProfile(userId);
-    await this.userRepository.remove(user);
   }
 
   async getStats(
@@ -241,6 +269,37 @@ export class UserService {
     return { avatarUrl: user.avatarUrl };
   }
 
+  async deleteProfile(userId: string, password: string): Promise<void> {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid password');
+    }
+
+    const deletionId = crypto.randomUUID();
+
+    user.email = `deleted-${deletionId}@bytechain.invalid`;
+    user.name = 'Deleted User';
+
+    user.username = null;
+    user.walletAddress = null;
+    user.avatarUrl = null;
+    user.bio = null;
+    user.resetToken = null;
+
+    // prevent login completely
+    user.password = crypto.randomUUID();
+
+    await this.userRepository.save(user);
+  }
+
   async getMyStats(userId: string): Promise<{
     courseCount: number;
     completedCourseCount: number;
@@ -278,40 +337,19 @@ export class UserService {
     };
   }
 
-  async getPublicProfile(userId: string): Promise<{
-    id: string;
-    username: string | null;
-    xp: number;
-    badgesCount: number;
-    coursesCompleted: number;
-    avatarUrl: string | null;
-    bio: string | null;
-  }> {
+  async getPublicProfile(userId: string): Promise<PublicProfileDto> {
     const user = await this.getProfile(userId);
     const badgesCount = await this.userBadgeRepository.count({
       where: { userId },
     });
 
-    return {
-      id: user.id,
-      username: user.username ?? user.name ?? null,
-      xp: this.resolveXp(user),
-      badgesCount,
-      coursesCompleted: user.coursesCompleted ?? 0,
-      avatarUrl: user.avatarUrl ?? null,
-      bio: user.bio ?? null,
-    };
+    return this.toPublicProfile(user, badgesCount);
   }
 
-  async findByUsername(username: string): Promise<{
-    id: string;
-    username: string | null;
-    xp: number;
-    badgesCount: number;
-    coursesCompleted: number;
-    avatarUrl: string | null;
-    bio: string | null;
-  }> {
+  async findByUsername(username: string): Promise<PublicProfileDto> {
+    // username is not enforced as UNIQUE at the DB level; findOne returns the
+    // first match when duplicates exist. This is a known limitation — a future
+    // migration should add a UNIQUE constraint on the username column.
     const user = await this.userRepository.findOne({
       where: { username: ILike(username) },
     });
@@ -324,14 +362,94 @@ export class UserService {
       where: { userId: user.id },
     });
 
+    return this.toPublicProfile(user, badgesCount);
+  }
+
+  async adminListUsers(
+    page: number,
+    limit: number,
+    search?: string,
+  ): Promise<PaginatedResult<User>> {
+    const safePage = Number.isFinite(page) ? Math.max(1, page) : 1;
+    const safeLimit = Number.isFinite(limit)
+      ? Math.min(100, Math.max(1, limit))
+      : 10;
+    const trimmedSearch = search?.trim();
+
+    const where = trimmedSearch
+      ? [
+          { email: Like(`%${trimmedSearch}%`) },
+          { username: Like(`%${trimmedSearch}%`) },
+          { name: Like(`%${trimmedSearch}%`) },
+        ]
+      : undefined;
+
+    const [data, total] = await this.userRepository.findAndCount({
+      where,
+      order: { createdAt: 'DESC' },
+      skip: (safePage - 1) * safeLimit,
+      take: safeLimit,
+    });
+
     return {
-      id: user.id,
-      username: user.username ?? user.name ?? null,
-      xp: this.resolveXp(user),
-      badgesCount,
-      coursesCompleted: user.coursesCompleted ?? 0,
-      avatarUrl: user.avatarUrl ?? null,
-      bio: user.bio ?? null,
+      data,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
     };
+  }
+
+  async adminGetUser(userId: string): Promise<User> {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return user;
+  }
+
+  async adminUpdateRole(
+    actorUserId: string,
+    userId: string,
+    role: UserRole,
+  ): Promise<User> {
+    const user = await this.adminGetUser(userId);
+
+    if (actorUserId === userId && role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Admins cannot demote themselves');
+    }
+
+    user.role = role;
+    return this.userRepository.save(user);
+  }
+
+  async adminSuspendUser(userId: string, suspended: boolean): Promise<User> {
+    const user = await this.adminGetUser(userId);
+    user.suspended = suspended;
+    return this.userRepository.save(user);
+  }
+
+  async incrementFailedLoginAttempts(userId: string): Promise<void> {
+    const user = await this.getProfile(userId);
+    user.failedLoginAttempts = (user.failedLoginAttempts ?? 0) + 1;
+
+    if (user.failedLoginAttempts === 5) {
+      const lockedUntil = new Date();
+      lockedUntil.setMinutes(lockedUntil.getMinutes() + 15);
+      user.lockedUntil = lockedUntil;
+    } else if (user.failedLoginAttempts === 10) {
+      const lockedUntil = new Date();
+      lockedUntil.setMinutes(lockedUntil.getMinutes() + 60);
+      user.lockedUntil = lockedUntil;
+    }
+
+    await this.userRepository.save(user);
+  }
+
+  async resetFailedLoginAttempts(userId: string): Promise<void> {
+    await this.userRepository.update(userId, {
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+    });
   }
 }

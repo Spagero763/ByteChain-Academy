@@ -5,6 +5,7 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  DeleteDateColumn,
   OneToMany,
 } from 'typeorm';
 import { CourseRegistration } from './course-registration.entity';
@@ -23,6 +24,15 @@ export class Course {
   @Column({ default: false })
   published: boolean;
 
+  @Column({ type: 'varchar', nullable: true })
+  difficulty: string | null;
+
+  @Column({ type: 'simple-json', default: '[]' })
+  tags: string[];
+
+  @Column({ type: 'varchar', nullable: true })
+  thumbnailUrl: string | null;
+
   @OneToMany(() => CourseRegistration, (registration) => registration.course)
   registrations: CourseRegistration[];
 
@@ -34,4 +44,8 @@ export class Course {
 
   @UpdateDateColumn()
   updatedAt: Date;
+
+  // Soft-delete field for admin restore functionality
+  @DeleteDateColumn({ nullable: true })
+  deletedAt: Date | null;
 }

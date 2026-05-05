@@ -9,16 +9,16 @@ import { Repository } from 'typeorm';
 import { Quiz } from '../quizzes/entities/quiz.entity';
 import { Question } from '../quizzes/entities/question.entity';
 import { QuizSubmission } from '../quizzes/entities/quiz-submission.entity';
-import { Lesson } from 'src/lessons/entities/lesson.entity';
+import { Lesson } from '../lessons/entities/lesson.entity';
 import { CreateQuizDto } from './dto/create-quiz.dto';
 import { SubmitQuizDto } from './dto/submit-quiz.dto';
 import { UpdateQuizDto } from './dto/update-quiz.dto';
-import { NotificationsService } from 'src/notifications/notifications.service';
-import { NotificationType } from 'src/notifications/entities/notification.entity';
-import { RewardsService } from 'src/rewards/rewards.service';
-import { XP_QUIZ_PASS } from 'src/rewards/rewards.service';
-import { XpRewardReason } from 'src/rewards/entities/reward-history.entity';
-import { StreakService } from 'src/users/streak.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { RewardsService } from '../rewards/rewards.service';
+import { XP_QUIZ_PASS } from '../rewards/rewards.service';
+import { XpRewardReason } from '../rewards/entities/reward-history.entity';
+import { StreakService } from '../users/streak.service';
 
 @Injectable()
 export class QuizzesService {
@@ -56,6 +56,7 @@ export class QuizzesService {
     const quiz = this.quizRepository.create({
       title: createQuizDto.title,
       description: createQuizDto.description,
+      maxAttempts: createQuizDto.maxAttempts ?? 1,
       lessonId: createQuizDto.lessonId,
     });
 
@@ -97,6 +98,9 @@ export class QuizzesService {
 
     if (updateQuizDto.title) quiz.title = updateQuizDto.title;
     if (updateQuizDto.description) quiz.description = updateQuizDto.description;
+    if (updateQuizDto.maxAttempts !== undefined) {
+      quiz.maxAttempts = updateQuizDto.maxAttempts;
+    }
 
     if (updateQuizDto.questions) {
       // Simple approach: delete old questions and insert new ones
@@ -128,15 +132,6 @@ export class QuizzesService {
     userId: string,
     submitQuizDto: SubmitQuizDto,
   ): Promise<QuizSubmission> {
-    // Check for duplicate submission first (fail fast optimization)
-    const existingSubmission = await this.quizSubmissionRepository.findOne({
-      where: { userId, quizId: submitQuizDto.quizId },
-    });
-
-    if (existingSubmission) {
-      throw new ConflictException('You have already submitted this quiz');
-    }
-
     // Check if quiz exists and load questions
     const quiz = await this.quizRepository.findOne({
       where: { id: submitQuizDto.quizId },
@@ -146,6 +141,17 @@ export class QuizzesService {
     if (!quiz) {
       throw new NotFoundException(
         `Quiz with ID ${submitQuizDto.quizId} not found`,
+      );
+    }
+
+    const existingAttemptCount = await this.quizSubmissionRepository.count({
+      where: { userId, quizId: submitQuizDto.quizId },
+    });
+    const maxAttempts = quiz.maxAttempts ?? 1;
+
+    if (existingAttemptCount >= maxAttempts) {
+      throw new ConflictException(
+        `You have reached the maximum attempt limit for this quiz (${maxAttempts} attempt${maxAttempts === 1 ? '' : 's'}).`,
       );
     }
 
@@ -214,6 +220,7 @@ export class QuizzesService {
     const submission = this.quizSubmissionRepository.create({
       userId,
       quizId: submitQuizDto.quizId,
+      attemptNumber: existingAttemptCount + 1,
       answers: submitQuizDto.answers,
       score: parseFloat(score.toFixed(2)),
       totalQuestions,
@@ -233,8 +240,8 @@ export class QuizzesService {
       await this.notificationsService.createNotification(
         userId,
         NotificationType.QUIZ_PASSED,
-        `You passed the quiz "${quiz.title}".`,
-        `/courses/lessons/${quiz.lessonId}`,
+        'You passed a quiz!',
+        '/rewards',
       );
       await this.streakService.updateStreak(userId);
     }
@@ -248,6 +255,17 @@ export class QuizzesService {
   ): Promise<QuizSubmission | null> {
     return this.quizSubmissionRepository.findOne({
       where: { userId, quizId },
+      order: { attemptNumber: 'DESC' },
+    });
+  }
+
+  async getUserQuizAttempts(
+    userId: string,
+    quizId: string,
+  ): Promise<QuizSubmission[]> {
+    return this.quizSubmissionRepository.find({
+      where: { userId, quizId },
+      order: { attemptNumber: 'ASC' },
     });
   }
 

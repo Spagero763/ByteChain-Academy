@@ -22,14 +22,20 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { DAOModule } from './dao/dao.module';
 import { EmailModule } from './email/email.module';
+import { LoggerModule } from 'nestjs-pino';
+import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
+import { MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { CurrenciesModule } from './currencies/currencies.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       validationSchema: Joi.object({
-        NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
+        NODE_ENV: Joi.string()
+          .valid('development', 'production', 'test')
+          .default('development'),
         PORT: Joi.number().default(3001),
 
         JWT_SECRET: Joi.string().min(32).required(),
@@ -38,7 +44,7 @@ import { CurrenciesModule } from './currencies/currencies.module';
         DB_HOST: Joi.string().default('localhost'),
         DB_PORT: Joi.number().default(5432),
         DB_USERNAME: Joi.string().default('postgres'),
-        DB_PASSWORD: Joi.string().default(''),
+        DB_PASSWORD: Joi.string().allow('').default(''),
         DB_NAME: Joi.string().default('bytechain'),
 
         FRONTEND_URL: Joi.string().uri().default('http://localhost:3000'),
@@ -52,7 +58,9 @@ import { CurrenciesModule } from './currencies/currencies.module';
         SMTP_USER: Joi.string().optional().allow(''),
         SMTP_PASS: Joi.string().optional().allow(''),
         SMTP_FROM_NAME: Joi.string().default('ByteChain Academy'),
-        SMTP_FROM_EMAIL: Joi.string().email().default('noreply@bytechain.academy'),
+        SMTP_FROM_EMAIL: Joi.string()
+          .email()
+          .default('noreply@bytechain.academy'),
 
         AVATAR_UPLOAD_PATH: Joi.string().default('uploads/avatars'),
         MAX_AVATAR_SIZE_MB: Joi.number().default(2),
@@ -65,6 +73,27 @@ import { CurrenciesModule } from './currencies/currencies.module';
       database: 'database.sqlite',
       autoLoadEntities: true,
       synchronize: true,
+    }),
+    LoggerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const isProd = config.get('NODE_ENV') === 'production';
+        return {
+          pinoHttp: {
+            customProps: (req) => ({
+              correlationId: (req as any).correlationId,
+            }),
+            transport: isProd
+              ? undefined
+              : {
+                  target: 'pino-pretty',
+                  options: {
+                    singleLine: true,
+                  },
+                },
+          },
+        };
+      },
     }),
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
@@ -93,6 +122,7 @@ import { CurrenciesModule } from './currencies/currencies.module';
     DAOModule,
     EmailModule,
     CurrenciesModule,
+    WebhooksModule,
   ],
   controllers: [AppController],
   providers: [
@@ -103,4 +133,8 @@ import { CurrenciesModule } from './currencies/currencies.module';
     },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(CorrelationIdMiddleware).forRoutes('*');
+  }
+}

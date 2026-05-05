@@ -14,6 +14,7 @@ export enum ProposalStatus {
   ACTIVE = 'ACTIVE',
   PASSED = 'PASSED',
   REJECTED = 'REJECTED',
+  WITHDRAWN = 'WITHDRAWN',
 }
 
 @Entity('dao_proposals')
@@ -54,6 +55,19 @@ export class DAOProposal {
 
   @CreateDateColumn()
   createdAt: Date;
+
+  @Column({ type: 'text', nullable: true })
+  moderationReason: string | null;
+
+  @Column({ type: 'datetime', nullable: true })
+  moderatedAt: Date | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  moderatorId: string | null;
+
+  @ManyToOne(() => User)
+  @JoinColumn({ name: 'moderatorId' })
+  moderator: User;
 
   @OneToMany(() => DAOVote, (vote) => vote.proposal)
   votes: DAOVote[];

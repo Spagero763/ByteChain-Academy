@@ -1,11 +1,17 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
-import { ConflictException, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import {
+  ConflictException,
+  UnauthorizedException,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
-import { UserService } from 'src/users/users.service';
-import { UserRole } from 'src/users/entities/user.entity';
-import { EmailService } from 'src/email/email.service';
+import { UserService } from '../users/users.service';
+import { UserRole } from '../users/entities/user.entity';
+import { EmailService } from '../email/email.service';
+import { RefreshToken } from './entities/refresh-token.entity';
 
 const mockUser = {
   id: 'user-uuid-1',
@@ -23,8 +29,19 @@ describe('AuthService', () => {
     validatePassword: jest.Mock;
     createResetToken: jest.Mock;
     resetPassword: jest.Mock;
+    incrementFailedLoginAttempts: jest.Mock;
+    resetFailedLoginAttempts: jest.Mock;
   };
   let jwtService: { sign: jest.Mock };
+  let configService: { get: jest.Mock };
+  let emailService: {
+    sendWelcomeEmail: jest.Mock;
+    sendPasswordResetEmail: jest.Mock;
+  };
+  let refreshTokenRepository: {
+    save: jest.Mock;
+    findOne: jest.Mock;
+  };
 
   beforeEach(async () => {
     userService = {
@@ -33,28 +50,48 @@ describe('AuthService', () => {
       validatePassword: jest.fn(),
       createResetToken: jest.fn(),
       resetPassword: jest.fn(),
+      incrementFailedLoginAttempts: jest.fn(),
+      resetFailedLoginAttempts: jest.fn(),
     };
     jwtService = { sign: jest.fn().mockReturnValue('signed-jwt-token') };
+    configService = {
+      get: jest.fn().mockImplementation((key: string) => {
+        if (key === 'REFRESH_TOKEN_EXPIRES_IN') return '30';
+        if (key === 'CLIENT_URL') return 'http://localhost:3000';
+        return undefined;
+      }),
+    };
+    emailService = {
+      sendWelcomeEmail: jest.fn().mockResolvedValue(undefined),
+      sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
+    };
+    refreshTokenRepository = {
+      save: jest.fn().mockResolvedValue(undefined),
+      findOne: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
         {
           provide: UserService,
-          useValue: { create: jest.fn(), findByEmail: jest.fn() },
+          useValue: userService,
         },
         {
           provide: JwtService,
-          useValue: { sign: jest.fn(), verify: jest.fn() },
-        { provide: UserService, useValue: userService },
-        { provide: JwtService, useValue: jwtService },
-        { provide: ConfigService, useValue: { get: jest.fn() } },
+          useValue: jwtService,
+        },
+        {
+          provide: ConfigService,
+          useValue: configService,
+        },
         {
           provide: EmailService,
-          useValue: {
-            sendWelcomeEmail: jest.fn().mockResolvedValue(undefined),
-            sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
-          },
+          useValue: emailService,
+        },
+        {
+          provide: getRepositoryToken(RefreshToken),
+          useValue: refreshTokenRepository,
         },
       ],
     }).compile();
@@ -94,7 +131,8 @@ describe('AuthService', () => {
       });
       expect(result).toEqual({
         user: { id: mockUser.id, email: mockUser.email, role: mockUser.role },
-        token: 'signed-jwt-token',
+        accessToken: 'signed-jwt-token',
+        refreshToken: expect.any(String),
       });
     });
 
@@ -135,7 +173,8 @@ describe('AuthService', () => {
       });
       expect(result).toEqual({
         user: { id: mockUser.id, email: mockUser.email, role: mockUser.role },
-        token: 'signed-jwt-token',
+        accessToken: 'signed-jwt-token',
+        refreshToken: expect.any(String),
       });
     });
 
@@ -158,6 +197,51 @@ describe('AuthService', () => {
       ).rejects.toThrow(new UnauthorizedException('Invalid credentials'));
 
       expect(jwtService.sign).not.toHaveBeenCalled();
+    });
+
+    it('should increment failed login attempts on wrong password', async () => {
+      userService.findByEmail.mockResolvedValue(mockUser);
+      userService.validatePassword.mockResolvedValue(false);
+
+      await expect(
+        service.login({ email: mockUser.email, password: 'wrong-password' }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(userService.incrementFailedLoginAttempts).toHaveBeenCalledWith(
+        mockUser.id,
+      );
+    });
+
+    it('should throw UnauthorizedException with minutes remaining when account is locked', async () => {
+      const lockedUser = {
+        ...mockUser,
+        lockedUntil: new Date(Date.now() + 15 * 60000), // 15 minutes from now
+      };
+      userService.findByEmail.mockResolvedValue(lockedUser);
+
+      await expect(
+        service.login({ email: mockUser.email, password: 'any-password' }),
+      ).rejects.toThrow(
+        new UnauthorizedException(
+          'Account is temporarily locked. Please try again in 15 minute(s).',
+        ),
+      );
+
+      expect(userService.validatePassword).not.toHaveBeenCalled();
+    });
+
+    it('should reset failed login attempts on successful login', async () => {
+      userService.findByEmail.mockResolvedValue(mockUser);
+      userService.validatePassword.mockResolvedValue(true);
+
+      await service.login({
+        email: mockUser.email,
+        password: 'correct-password',
+      });
+
+      expect(userService.resetFailedLoginAttempts).toHaveBeenCalledWith(
+        mockUser.id,
+      );
     });
   });
 

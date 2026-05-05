@@ -1,12 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Course } from 'src/courses/entities/course.entity';
+import { Course } from '../courses/entities/course.entity';
 import { Lesson } from './entities/lesson.entity';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { PaginationService } from '../common/services/pagination.service';
 import { PaginatedResult } from '../common/services/pagination.service';
 import { CreateLessonDto } from './dto/create-lesson.dto';
 import { UpdateLessonDto } from './dto/update-lesson.dto';
+import { Quiz } from '../quizzes/entities/quiz.entity';
 
 @Injectable()
 export class LessonsService {
@@ -15,6 +16,8 @@ export class LessonsService {
     private lessonRepository: Repository<Lesson>,
     @InjectRepository(Course)
     private courseRepository: Repository<Course>,
+    @InjectRepository(Quiz)
+    private quizRepository: Repository<Quiz>,
     private readonly paginationService: PaginationService,
   ) {}
 
@@ -38,12 +41,19 @@ export class LessonsService {
       videoStartTimestamp: createLessonDto.videoStartTimestamp,
       order: createLessonDto.order ?? 0,
       courseId: createLessonDto.courseId,
+      published:
+        createLessonDto.published !== undefined
+          ? createLessonDto.published
+          : true,
     });
 
     return this.lessonRepository.save(lesson);
   }
 
-  async findAllByCourse(courseId: string): Promise<Lesson[]> {
+  async findAllByCourse(
+    courseId: string,
+    publishedOnly: boolean = false,
+  ): Promise<Lesson[]> {
     // Verify course exists
     const course = await this.courseRepository.findOne({
       where: { id: courseId },
@@ -53,8 +63,13 @@ export class LessonsService {
       throw new NotFoundException(`Course with ID ${courseId} not found`);
     }
 
+    const whereCondition: any = { courseId };
+    if (publishedOnly) {
+      whereCondition.published = true;
+    }
+
     return this.lessonRepository.find({
-      where: { courseId },
+      where: whereCondition,
       order: { order: 'ASC', createdAt: 'ASC' },
     });
   }
@@ -76,7 +91,10 @@ export class LessonsService {
     courseId: string,
     page: number,
     limit: number,
-  ): Promise<PaginatedResult<Lesson>> {
+    publishedOnly: boolean = false,
+  ): Promise<
+    PaginatedResult<Lesson & { hasQuiz: boolean; quizId: string | null }>
+  > {
     const course = await this.courseRepository.findOne({
       where: { id: courseId },
     });
@@ -85,14 +103,37 @@ export class LessonsService {
       throw new NotFoundException(`Course with ID ${courseId} not found`);
     }
 
-    return this.paginationService.paginate(
+    const whereCondition: any = { courseId };
+    if (publishedOnly) {
+      whereCondition.published = true;
+    }
+
+    const result = await this.paginationService.paginate(
       this.lessonRepository,
       { page, limit },
       {
-        where: { courseId },
+        where: whereCondition,
         order: { order: 'ASC', createdAt: 'ASC' },
       },
     );
+
+    const lessonIds = result.data.map((l) => l.id);
+    const quizzes = lessonIds.length
+      ? await this.quizRepository.find({
+          where: { lessonId: In(lessonIds) },
+          select: ['id', 'lessonId'],
+        })
+      : [];
+    const quizMap = new Map(quizzes.map((q) => [q.lessonId, q.id]));
+
+    return {
+      ...result,
+      data: result.data.map((l) => ({
+        ...l,
+        hasQuiz: quizMap.has(l.id),
+        quizId: quizMap.get(l.id) ?? null,
+      })),
+    };
   }
 
   async findOne(id: string): Promise<Lesson> {
@@ -106,6 +147,26 @@ export class LessonsService {
     }
 
     return lesson;
+  }
+
+  async findOneWithQuizFlag(
+    id: string,
+  ): Promise<Lesson & { hasQuiz: boolean; quizId: string | null }> {
+    const lesson = await this.lessonRepository.findOne({
+      where: { id },
+      relations: ['course'],
+    });
+
+    if (!lesson) {
+      throw new NotFoundException(`Lesson with ID ${id} not found`);
+    }
+
+    const quiz = await this.quizRepository.findOne({
+      where: { lessonId: id },
+      select: ['id'],
+    });
+
+    return { ...lesson, hasQuiz: !!quiz, quizId: quiz?.id ?? null };
   }
 
   async update(id: string, updateLessonDto: UpdateLessonDto): Promise<Lesson> {
@@ -132,6 +193,9 @@ export class LessonsService {
     }
     if (updateLessonDto.order !== undefined) {
       lesson.order = updateLessonDto.order;
+    }
+    if (updateLessonDto.published !== undefined) {
+      lesson.published = updateLessonDto.published;
     }
 
     return this.lessonRepository.save(lesson);
@@ -163,5 +227,18 @@ export class LessonsService {
         this.lessonRepository.update({ id, courseId }, { order: index }),
       ),
     );
+  }
+
+  async setPublished(id: string, published: boolean): Promise<Lesson> {
+    const lesson = await this.lessonRepository.findOne({
+      where: { id },
+    });
+
+    if (!lesson) {
+      throw new NotFoundException(`Lesson with ID ${id} not found`);
+    }
+
+    lesson.published = published;
+    return this.lessonRepository.save(lesson);
   }
 }

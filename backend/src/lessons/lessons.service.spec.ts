@@ -1,19 +1,16 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { NotFoundException } from '@nestjs/common';
 import { LessonsService } from './lessons.service';
-import { Course } from 'src/courses/entities/course.entity';
+import { Course } from '../courses/entities/course.entity';
 import { CreateLessonDto } from './dto/create-lesson.dto';
 import { UpdateLessonDto } from './dto/update-lesson.dto';
 import { Lesson } from './entities/lesson.entity';
 import { PaginationService } from '../common/services/pagination.service';
+import { Quiz } from '../quizzes/entities/quiz.entity';
 
 describe('LessonsService', () => {
   let service: LessonsService;
-  let lessonRepository: Repository<Lesson>;
-  let courseRepository: Repository<Course>;
-
   const mockLessonRepository = {
     create: jest.fn(),
     save: jest.fn(),
@@ -24,6 +21,11 @@ describe('LessonsService', () => {
   };
 
   const mockCourseRepository = {
+    findOne: jest.fn(),
+  };
+
+  const mockQuizRepository = {
+    find: jest.fn(),
     findOne: jest.fn(),
   };
 
@@ -40,21 +42,25 @@ describe('LessonsService', () => {
           useValue: mockCourseRepository,
         },
         {
+          provide: getRepositoryToken(Quiz),
+          useValue: mockQuizRepository,
+        },
+        {
           provide: PaginationService,
           useValue: {
-            paginate: jest.fn().mockResolvedValue({ data: [], total: 0, page: 1, limit: 10, totalPages: 0 }),
+            paginate: jest.fn().mockResolvedValue({
+              data: [],
+              total: 0,
+              page: 1,
+              limit: 10,
+              totalPages: 0,
+            }),
           },
         },
       ],
     }).compile();
 
     service = module.get<LessonsService>(LessonsService);
-    lessonRepository = module.get<Repository<Lesson>>(
-      getRepositoryToken(Lesson),
-    );
-    courseRepository = module.get<Repository<Course>>(
-      getRepositoryToken(Course),
-    );
   });
 
   afterEach(() => {
