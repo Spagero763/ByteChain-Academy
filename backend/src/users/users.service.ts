@@ -6,7 +6,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
+import { ILike, Repository, MoreThan } from 'typeorm';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { RegisterDto } from 'src/auth/dto/register.dto';
@@ -290,6 +290,38 @@ export class UserService {
     const user = await this.getProfile(userId);
     const badgesCount = await this.userBadgeRepository.count({
       where: { userId },
+    });
+
+    return {
+      id: user.id,
+      username: user.username ?? user.name ?? null,
+      xp: this.resolveXp(user),
+      badgesCount,
+      coursesCompleted: user.coursesCompleted ?? 0,
+      avatarUrl: user.avatarUrl ?? null,
+      bio: user.bio ?? null,
+    };
+  }
+
+  async findByUsername(username: string): Promise<{
+    id: string;
+    username: string | null;
+    xp: number;
+    badgesCount: number;
+    coursesCompleted: number;
+    avatarUrl: string | null;
+    bio: string | null;
+  }> {
+    const user = await this.userRepository.findOne({
+      where: { username: ILike(username) },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const badgesCount = await this.userBadgeRepository.count({
+      where: { userId: user.id },
     });
 
     return {

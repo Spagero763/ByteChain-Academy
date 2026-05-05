@@ -91,6 +91,21 @@ export class UsersController {
     return this.userService.getMyStats(req.user.id as string);
   }
 
+  @Get('by-username/:username')
+  async getPublicProfileByUsername(
+    @Param('username') username: string,
+  ): Promise<{
+    id: string;
+    username: string | null;
+    xp: number;
+    badgesCount: number;
+    coursesCompleted: number;
+    avatarUrl: string | null;
+    bio: string | null;
+  }> {
+    return this.userService.findByUsername(username);
+  }
+
   @Get(':id/public')
   async getPublicProfile(@Param('id') id: string): Promise<{
     id: string;
